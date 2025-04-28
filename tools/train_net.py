@@ -421,10 +421,10 @@ def main(args):
             )
 
             if cfg.TEST.CAT_MODE == 'all':  
-                do_test(cfg, model, 'novel')
-                do_test(cfg, model, 'base')
+                do_test(cfg, model, mode='novel')
+                do_test(cfg, model, mode='base')
             else:
-                do_test(cfg, model, cfg.TEST.CAT_MODE)
+                do_test(cfg, model, mode=cfg.TEST.CAT_MODE)
                 
             return 
 
