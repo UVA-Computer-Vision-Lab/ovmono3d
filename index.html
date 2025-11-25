@@ -83,6 +83,10 @@
             </span>
           </div>
 
+          <div class="is-size-4 has-text-centered" style="margin-top: 1rem; margin-bottom: 0.5rem;">
+            <strong>3DV 2026</strong>
+          </div>
+
           <div class="column has-text-centered">
             <div class="publication-links">
               <!-- PDF Link. -->
@@ -173,16 +177,13 @@
         <h2 class="title is-3">Abstract</h2>
         <div class="content has-text-justified">
           <p>
-            In this work, we pioneer the study of open-vocabulary monocular 3D object detection, a novel task that aims to detect and localize objects in 3D space from a single RGB image without limiting detection to a predefined set of categories. 
+            We propose and study open-vocabulary monocular 3D detection, a novel task that aims to detect objects of any categories in metric 3D space from a single RGB image. Existing 3D object detectors either rely on costly sensors such as LiDAR or multi-view setups, or remain confined to closed vocabularies settings with limited categories, restricting their applicability.
           </p>
           <p>
-            We formalize this problem, establish baseline methods, and introduce a class-agnostic approach that leverages open-vocabulary 2D detectors and lifts 2D bounding boxes into 3D space. 
-            Our approach decouples the recognition and localization of objects in 2D from the task of estimating 3D bounding boxes, enabling generalization across unseen categories. 
-            Additionally, we propose a target-aware evaluation protocol to address inconsistencies in existing datasets, improving the reliability of model performance assessment. 
+            We identify two key challenges in this new setting. First, the scarcity of 3D bounding box annotations limits the ability to train generalizable models. To reduce dependence on 3D supervision, we propose a framework that effectively integrates pretrained 2D and 3D vision foundation models. Second, missing labels and semantic ambiguities (e.g., table vs. desk) in existing datasets hinder reliable evaluation. To address this, we design a novel metric that captures model performance while mitigating annotation issues.
           </p>
           <p>
-            Extensive experiments on the Omni3D dataset demonstrate the effectiveness of the proposed method in zero-shot 3D detection for novel object categories, validating its robust generalization capabilities. 
-            Our method and evaluation protocols contribute towards the development of open-vocabulary object detection models that can effectively operate in real-world, category-diverse environments.
+            Our approach achieves state-of-the-art results in zero-shot 3D detection of novel categories as well as in-domain detection on seen classes. We hope our method provides a strong baseline and our evaluation protocol establishes a reliable benchmark for future research.
           </p>
         </div>
       </div>
@@ -203,7 +204,7 @@
           <p>
             <strong>(a)</strong> OVMono3D-GEO is a training-free method that predicts 3D detections from 2D via geometric unprojection. 
             It exploits off-the-shelf depth estimation (e.g., 
-            <a href="https://github.com/apple/ml-depth-pro" target="_blank">Depth Pro</a>), 
+            <a href="https://github.com/lpiccinelli-eth/UniDepth" target="_blank">UniDepth</a>), 
             segmentation (e.g., 
             <a href="https://github.com/facebookresearch/segment-anything" target="_blank">SAM</a>), 
             and OV 2D detector (<a href="https://github.com/IDEA-Research/GroundingDINO" target="_blank">Grounding DINO</a>). 
@@ -249,18 +250,11 @@
     
     <!-- figure and caption -->
     <figure>
-      <img src="static/images/annotationissue.png" alt="Target-Aware Evaluation" style="width: 100%; display: block; margin: 0 auto;">
+      <img src="static/images/annotationissue.png" alt="Target-Aware Evaluation" style="width: 60%; display: block; margin: 0 auto;">
       <figcaption>
         <div class="content">
           <p>
-            <strong>(a)</strong> 
-            <span style="color: blue;">Naming ambiguity</span> and 
-            <span style="color: red;">missing annotations</span> are common in the benchmarks. 
-            In this example, the 3D annotations are missing for "books"; the "shelves" share high similarity with "bookcases".
-            <strong>(b)</strong> 
-            This induces inaccurate performance assessment of open-vocabulary 3D detection under the standard evaluation.
-            <strong>(c)</strong> 
-            Our target-aware evaluation effectively resolves this issue by prompting the categories presented in the annotations.
+            By prompting only categories that exist in the annotations, our target-aware evaluation mitigates the negative impact of missing annotations (e.g., "book" in (a)) and naming ambiguity (e.g., "vase" <i>vs.</i> "potted plant" and "chair" <i>vs.</i> "sofa").
           </p>
         </div>
       </figcaption>
