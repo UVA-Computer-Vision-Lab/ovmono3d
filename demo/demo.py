@@ -79,10 +79,25 @@ def do_test(args, cfg, model):
         _ = augmentations(aug_input)
         image = aug_input.image
 
-        batched = [{
-            'image': torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))).cuda(), 
-            'height': image_shape[0], 'width': image_shape[1], 'K': K, 'category_list': cats
-        }]
+        # If a UniDepth-generated .npz exists alongside the image, use it for depth +
+        # camera intrinsics (overrides the default K from --focal-length).
+        depth_npz = os.path.join(args.input_folder, im_name + '.npz')
+        depth_tensor = None
+        if os.path.exists(depth_npz):
+            import cv2
+            npz = np.load(depth_npz)
+            depth_np = npz['depth'].astype(np.float32)
+            K = npz['K'].astype(np.float32)
+            depth_resized = cv2.resize(depth_np, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+            depth_tensor = torch.as_tensor(depth_resized).unsqueeze(0).cuda()
+
+        batched_dict = {
+            'image': torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))).cuda(),
+            'height': image_shape[0], 'width': image_shape[1], 'K': K, 'category_list': cats,
+        }
+        if depth_tensor is not None:
+            batched_dict['depth'] = depth_tensor
+        batched = [batched_dict]
         dets = model(batched)[0]['instances']
         n_det = len(dets)
 

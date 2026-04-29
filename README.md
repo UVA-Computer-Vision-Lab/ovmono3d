@@ -58,11 +58,14 @@ python demo/demo.py --config-file configs/OVMono3D_dinov2_SFP.yaml \
 	--threshold 0.45 \
 	MODEL.ROI_HEADS.NAME ROIHeads3DGDINO \
 	MODEL.WEIGHTS checkpoints/ovmono3d_lift.pth \
-	OUTPUT_DIR output/coco_examples 
+	INPUT.USE_DEPTH True \
+	OUTPUT_DIR output/coco_examples
 ```
-to get the results for the example COCO images.
+to get the results for the example COCO images. The depth maps + estimated camera intrinsics for these example images are pre-generated as `.npz` files alongside each `.jpg`; `demo.py` loads them automatically when present.
 
 You can also try your own images and prompted category labels. See the format of the label file in [`labels.json`](datasets/coco_examples/labels.json). If you know the camera intrinsics you could input them as arguments with the convention `--focal-length <float>` and `--principal-point <float> <float>`. Check [`demo.py`](demo/demo.py) for more details.
+
+Note: results on in-the-wild images may be lower quality due to inaccurate estimated intrinsics and depth.
 
 
 ## Data <a name="data"></a>

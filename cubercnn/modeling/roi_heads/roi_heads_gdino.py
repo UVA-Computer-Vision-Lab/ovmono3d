@@ -90,7 +90,7 @@ class ROIHeads3DGDINO(ROIHeads3D):
             cpu_only=False
         )
 
-    def forward(self, images, features, proposals, Ks, im_scales_ratio, targets=None, category_list=None):
+    def forward(self, images, features, proposals, Ks, im_scales_ratio, targets=None, prompt_depth=None, category_list=None):
 
         im_dims = [image.shape[1:] for image in images]
 
@@ -105,7 +105,7 @@ class ROIHeads3DGDINO(ROIHeads3D):
 
             losses = self._forward_box(features, proposals)
             if self.loss_w_3d > 0:
-                instances_3d, losses_cube = self._forward_cube(features, proposals, Ks, im_dims, im_scales_ratio)
+                instances_3d, losses_cube = self._forward_cube(features, proposals, Ks, im_dims, im_scales_ratio, prompt_depth=prompt_depth)
                 losses.update(losses_cube)
 
             return instances_3d, losses
@@ -167,7 +167,7 @@ class ROIHeads3DGDINO(ROIHeads3D):
                 target = target.to(device=pred_instances[0].scores.device)
 
             if self.loss_w_3d > 0:
-                pred_instances = self._forward_cube(features, [target,], Ks, im_dims, im_scales_ratio)
+                pred_instances = self._forward_cube(features, [target,], Ks, im_dims, im_scales_ratio, prompt_depth=prompt_depth)
             return pred_instances, {}
         
 
