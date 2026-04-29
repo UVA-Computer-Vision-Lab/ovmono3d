@@ -1,3 +1,4 @@
+import argparse
 import json
 import pickle
 import os
@@ -10,7 +11,7 @@ import open3d as o3d
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pytorch3d.transforms import (
-    rotation_6d_to_matrix, 
+    rotation_6d_to_matrix,
     matrix_to_rotation_6d,
 )
 from sklearn.decomposition import PCA
@@ -258,10 +259,15 @@ def run_one_2dbox_to_3d(depth_o3d, mask2d, rgb_o3d, K):
     return cube_3d.tolist(), cube_dims.tolist(), cube_pose_new.tolist(), bbox3d_infer2.tolist()
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset", type=str, default="SUNRGBD_test")
+args = parser.parse_args()
+
 dataset_list = {
-                'KITTI_test_novel': './datasets/Omni3D/gdino_kitti_novel_oracle_2d.json',
-                'ARKitScenes_test_novel': './datasets/Omni3D/gdino_arkitscenes_novel_oracle_2d.json',
-                'SUNRGBD_test_novel': './datasets/Omni3D/gdino_sunrgbd_novel_oracle_2d.json',}
+                'KITTI_test_novel': './datasets/Omni3D/gdino_novel_previous_metric_kitti_novel_oracle_2d_scale0.0.json',
+                'ARKitScenes_test_novel': './datasets/Omni3D/gdino_novel_previous_metric_arkitscenes_novel_oracle_2d_scale0.0.json',
+                'SUNRGBD_test_novel': './datasets/Omni3D/gdino_novel_previous_metric_sunrgbd_novel_oracle_2d_scale0.0.json',
+                }
 
 # Load model and preprocessing transform
 depthpro_model, depthpro_transform = depth_pro.create_model_and_transforms(device=torch.device("cuda"),precision=torch.float16)
@@ -273,59 +279,61 @@ seg_predictor = SamPredictor(sam)
 
 threshold = 0.30
 
-for dataset_name, dataset_pth in dataset_list.items():
-    with open(dataset_pth, 'r') as f:
-        dataset = json.load(f)
-    root = "./datasets/"
-    with open(os.path.join(root, "Omni3D", f"{dataset_name}.json"), "r") as file:
-        gt_anns = json.load(file)
-    imgid2path = {}
-    for img in gt_anns["images"]:
-        imgid2path[img['id']] = img['file_path']
-    new_dataset = []
-    for img in tqdm.tqdm(dataset):
-        im_path = os.path.join(root, imgid2path[img['image_id']])
+dataset_name = args.dataset
+dataset_pth = dataset_list[dataset_name]
 
-        # Load and preprocess an image.
-        image, _, f_px = depth_pro.load_rgb(im_path)
-        image = depthpro_transform(image)
+with open(dataset_pth, 'r') as f:
+    dataset = json.load(f)
+root = "./datasets/"
+with open(os.path.join(root, "Omni3D", f"{dataset_name}.json"), "r") as file:
+    gt_anns = json.load(file)
+imgid2path = {}
+for img in gt_anns["images"]:
+    imgid2path[img['id']] = img['file_path']
+new_dataset = []
+for img in tqdm.tqdm(dataset):
+    im_path = os.path.join(root, imgid2path[img['image_id']])
 
-        # Run inference.
-        prediction = depthpro_model.infer(image, f_px=f_px)
-        depth = prediction["depth"]  # Depth in [m].
+    # Load and preprocess an image.
+    image, _, f_px = depth_pro.load_rgb(im_path)
+    image = depthpro_transform(image)
 
-        depth_numpy = depth.cpu().numpy().astype(np.float32)
+    # Run inference.
+    prediction = depthpro_model.infer(image, f_px=f_px)
+    depth = prediction["depth"]  # Depth in [m].
 
-        depth_o3d = o3d.geometry.Image(depth_numpy)
-        new_instances = []
-        rgb = cv2.imread(im_path)
-        rgb_o3d = o3d.io.read_image(im_path)
-        K = np.array(img['K'])
-        for ins in img["instances"]:
-            if ins['score'] < threshold:
-                continue
-            bbox2D = xywh_to_xyxy(ins["bbox"])
-            mask2D = run_seg_anything(seg_predictor, rgb, bbox2D)
-            mask2d = mask2D[2, :, :] # largest mask
-            cube_3d, cube_dims, cube_pose_new, bbox3d_infer2 = run_one_2dbox_to_3d(depth_o3d, mask2d, rgb_o3d, K)
+    depth_numpy = depth.cpu().numpy().astype(np.float32)
 
-            new_instance = {key: value for key, value in ins.items() if key in ['category_id', 'bbox', 'score', 'category_name']}
-            new_instance["image_id"] = img['image_id']
-            new_instance["bbox3D"] = bbox3d_infer2
-            new_instance["depth"] = cube_3d[0][-1]
+    depth_o3d = o3d.geometry.Image(depth_numpy)
+    new_instances = []
+    rgb = cv2.imread(im_path)
+    rgb_o3d = o3d.io.read_image(im_path)
+    K = np.array(img['K'])
+    for ins in img["instances"]:
+        if ins['score'] < threshold:
+            continue
+        bbox2D = xywh_to_xyxy(ins["bbox"])
+        mask2D = run_seg_anything(seg_predictor, rgb, bbox2D)
+        mask2d = mask2D[2, :, :] # largest mask
+        cube_3d, cube_dims, cube_pose_new, bbox3d_infer2 = run_one_2dbox_to_3d(depth_o3d, mask2d, rgb_o3d, K)
 
-            new_instance["center_cam"] = cube_3d[0]
-            new_instance["dimensions"] = cube_dims[0]
-            new_instance["pose"] = cube_pose_new
-            x, y = project_3d_to_2d(cube_3d[0][0], cube_3d[0][1], cube_3d[0][2], K)
-            new_instance["center_2D"] = [x, y]
-            new_instances.append(new_instance)
-            
-        new_img = {key: value for key, value in img.items()}
-        new_img["instances"] = new_instances
-        new_dataset.append(new_img)
-    # Create output directory if it doesn't exist
-    output_dir = "./output/ovmono3d_geo"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    torch.save(new_dataset, f"{output_dir}/{dataset_name}.pth")
+        new_instance = {key: value for key, value in ins.items() if key in ['category_id', 'bbox', 'score', 'category_name']}
+        new_instance["image_id"] = img['image_id']
+        new_instance["bbox3D"] = bbox3d_infer2
+        new_instance["depth"] = cube_3d[0][-1]
+
+        new_instance["center_cam"] = cube_3d[0]
+        new_instance["dimensions"] = cube_dims[0]
+        new_instance["pose"] = cube_pose_new
+        x, y = project_3d_to_2d(cube_3d[0][0], cube_3d[0][1], cube_3d[0][2], K)
+        new_instance["center_2D"] = [x, y]
+        new_instances.append(new_instance)
+
+    new_img = {key: value for key, value in img.items()}
+    new_img["instances"] = new_instances
+    new_dataset.append(new_img)
+# Create output directory if it doesn't exist
+output_dir = "./output/ovmono3d_geo"
+os.makedirs(output_dir, exist_ok=True)
+
+torch.save(new_dataset, f"{output_dir}/{dataset_name}.pth")

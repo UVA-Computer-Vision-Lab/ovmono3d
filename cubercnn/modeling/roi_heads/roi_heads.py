@@ -9,10 +9,10 @@ import torch.nn.functional as F
 from pytorch3d.transforms.so3 import (
     so3_relative_angle
 )
-from detectron2.modeling.poolers import ROIPooler
+from detectron2.modeling.poolers import ROIPooler, convert_boxes_to_pooler_format
 from detectron2.config import configurable
 from detectron2.structures import Instances, Boxes, pairwise_iou, pairwise_ioa
-from detectron2.layers import ShapeSpec, nonzero_tuple
+from detectron2.layers import ShapeSpec, nonzero_tuple, ROIAlign
 from detectron2.modeling.proposal_generator.proposal_utils import add_ground_truth_to_proposals
 from detectron2.utils.events import get_event_storage
 from detectron2.modeling.roi_heads import (
@@ -67,11 +67,13 @@ class ROIHeads3D(StandardROIHeads):
         allocentric_pose=None,
         chamfer_pose=None,
         scale_roi_boxes=None,
+        use_depth: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.scale_roi_boxes = scale_roi_boxes
+        self.use_depth = use_depth  # Store depth configuration
 
         # rotation settings
         self.allocentric_pose = allocentric_pose
@@ -163,14 +165,18 @@ class ROIHeads3D(StandardROIHeads):
         pooler_sampling_ratio = cfg.MODEL.ROI_CUBE_HEAD.POOLER_SAMPLING_RATIO
         pooler_type = cfg.MODEL.ROI_CUBE_HEAD.POOLER_TYPE
 
-        cube_pooler = ROIPooler(
+        # Use custom pooler that supports depth input
+        cube_pooler = ROIWithPointPooler(
             output_size=pooler_resolution,
             scales=pooler_scales,
             sampling_ratio=pooler_sampling_ratio,
             pooler_type=pooler_type,
         )
-
-        in_channels = [input_shape[f].channels for f in in_features][0]
+        
+        # Add 3 channels for point map (X, Y, Z) only if depth is enabled
+        depth_channels = 3 if cfg.INPUT.USE_DEPTH else 0
+        in_channels = [input_shape[f].channels for f in in_features][0] + depth_channels
+        
         shape = ShapeSpec(
             channels=in_channels, width=pooler_resolution, height=pooler_resolution
         )
@@ -201,10 +207,11 @@ class ROIHeads3D(StandardROIHeads):
             'cluster_bins': cfg.MODEL.ROI_CUBE_HEAD.CLUSTER_BINS,
             'ignore_thresh': cfg.MODEL.RPN.IGNORE_THRESHOLD,
             'scale_roi_boxes': cfg.MODEL.ROI_CUBE_HEAD.SCALE_ROI_BOXES,
+            'use_depth': cfg.INPUT.USE_DEPTH,
         }
 
 
-    def forward(self, images, features, proposals, Ks, im_scales_ratio, targets=None):
+    def forward(self, images, features, proposals, Ks, im_scales_ratio, targets=None, prompt_depth=None, **kwargs):
 
         im_dims = [image.shape[1:] for image in images]
 
@@ -219,7 +226,7 @@ class ROIHeads3D(StandardROIHeads):
 
             losses = self._forward_box(features, proposals)
             if self.loss_w_3d > 0:
-                instances_3d, losses_cube = self._forward_cube(features, proposals, Ks, im_dims, im_scales_ratio)
+                instances_3d, losses_cube = self._forward_cube(features, proposals, Ks, im_dims, im_scales_ratio, prompt_depth)
                 losses.update(losses_cube)
 
             return instances_3d, losses
@@ -245,7 +252,7 @@ class ROIHeads3D(StandardROIHeads):
                 pred_instances = self._forward_box(features, proposals)
             
             if self.loss_w_3d > 0:
-                pred_instances = self._forward_cube(features, pred_instances, Ks, im_dims, im_scales_ratio)
+                pred_instances = self._forward_cube(features, pred_instances, Ks, im_dims, im_scales_ratio, prompt_depth)
             return pred_instances, {}
     
 
@@ -326,7 +333,9 @@ class ROIHeads3D(StandardROIHeads):
 
         return proposal_boxes_scaled
     
-    def _forward_cube(self, features, instances, Ks, im_current_dims, im_scales_ratio):
+
+
+    def _forward_cube(self, features, instances, Ks, im_current_dims, im_scales_ratio, prompt_depth=None):
         
         features = [features[f] for f in self.in_features]
 
@@ -362,8 +371,12 @@ class ROIHeads3D(StandardROIHeads):
 
         proposal_boxes_scaled = self.scale_proposals(proposal_boxes)
 
-        # forward features
-        cube_features = self.cube_pooler(features, proposal_boxes_scaled).flatten(1)
+        if self.use_depth and prompt_depth is not None:
+            point_map = depth_to_point_map(prompt_depth, Ks, im_scales_ratio, im_current_dims)
+        else:
+            point_map = None
+
+        cube_features = self.cube_pooler(features, proposal_boxes_scaled, point_map).flatten(1)
 
         n = cube_features.shape[0]
         
@@ -962,3 +975,171 @@ class ROIHeads3D(StandardROIHeads):
         else:
             # no valid losses, simply zero out
             return loss.mean()*0.0
+
+
+
+class ROIWithPointPooler(ROIPooler):
+    """
+    ROIPooler + Point-Map Fusion.
+
+    Args
+    ----
+    * inherit all parameters from ROIPooler
+    * point_stride (int): point map's downsampling stride (original image / point map resolution),
+      used to calculate spatial_scale = 1 / point_stride.
+    * point_sampling_ratio (int): ROIAlign's sampling ratio on point map, 
+    * fuse_type (str): 'concat' | 'sum' | 'avg'
+    """
+    def __init__(
+        self,
+        output_size,
+        scales,
+        sampling_ratio,
+        pooler_type,
+        canonical_box_size=224,
+        canonical_level=4,
+        point_stride: int = 1,
+        point_sampling_ratio: int = 0,
+        fuse_type: str = "concat",
+    ):
+        super().__init__(
+            output_size,
+            scales,
+            sampling_ratio,
+            pooler_type,
+            canonical_box_size,
+            canonical_level,
+        )
+
+        self.point_pooler = ROIAlign(
+            output_size,
+            spatial_scale=1.0 / point_stride,
+            sampling_ratio=point_sampling_ratio,
+            aligned=True,
+        )
+        assert fuse_type in ("concat", "sum", "avg"), f"Unsupported fuse_type {fuse_type}"
+        self.fuse_type = fuse_type
+
+    def forward(
+        self,
+        x: List[torch.Tensor],
+        box_lists: List[Boxes],
+        point_maps: torch.Tensor = None,        # (N, C_p, H_p, W_p), optional
+    ):
+        """
+        Returns
+        -------
+        Tensor
+            (M, C [+ C_p], output_size, output_size)
+        """
+        # 1 basic ROI features (from FPN layers)
+        roi_feat = super().forward(x, box_lists)            # (M, C, H, W)
+
+        # 2 crop point map if available
+        if point_maps is not None:
+            pooler_boxes = convert_boxes_to_pooler_format(box_lists).to(point_maps.device)
+            point_feat = self.point_pooler(point_maps, pooler_boxes)  # (M, C_p, H, W)
+
+            # 3 fusion
+            if self.fuse_type == "concat":
+                fused = torch.cat([roi_feat, point_feat], dim=1)
+            elif self.fuse_type == "sum":
+                # require C == C_p
+                fused = roi_feat + point_feat
+            else:  # 'avg'
+                fused = (roi_feat + point_feat) * 0.5
+        else:
+            # Return only ROI features when no depth is available
+            fused = roi_feat
+
+        return fused
+
+def depth_to_point_map(depth_maps, Ks, im_scales_ratio, im_current_dims):
+    """
+    Convert depth maps to point maps using camera intrinsics (fully batch operation)
+    
+    Args:
+        depth_maps: (N, 1, H_pad, W_pad) depth values for N images (padded)
+        Ks: List of (3, 3) camera intrinsic matrices
+        im_scales_ratio: List of image scale ratios
+        im_current_dims: List of actual image dimensions [(H1, W1), (H2, W2), ...]
+    
+    Returns:
+        point_maps: (N, 3, H_pad, W_pad) point cloud maps with (X, Y, Z) coordinates
+    """
+    N, _, H_pad, W_pad = depth_maps.shape
+    device = depth_maps.device
+    
+    # Batch convert all Ks to tensors
+    if all(isinstance(K, torch.Tensor) for K in Ks):
+        # If all are tensors, stack directly
+        K_batch = torch.stack([K.clone().float().to(device) for K in Ks], dim=0)
+    else:
+        # Mixed types, need to convert
+        K_list = []
+        for K in Ks:
+            if isinstance(K, torch.Tensor):
+                K_tensor = K.clone().float().to(device)
+            else:
+                K_tensor = torch.tensor(K, dtype=torch.float32, device=device)
+            K_list.append(K_tensor)
+        K_batch = torch.stack(K_list, dim=0)
+    
+    # Convert scale ratios to tensor and batch scale intrinsics
+    scale_ratios = torch.tensor(im_scales_ratio, dtype=torch.float32, device=device)  # (N,)
+    K_batch = K_batch / scale_ratios.view(N, 1, 1)  # Broadcasting: (N, 3, 3) / (N, 1, 1)
+    K_batch[:, 2, 2] = 1.0  # Keep homogeneous coordinate as 1
+    
+    # Extract camera parameters for all images
+    fx = K_batch[:, 0, 0]  # (N,)
+    fy = K_batch[:, 1, 1]  # (N,)
+    cx = K_batch[:, 0, 2]  # (N,)
+    cy = K_batch[:, 1, 2]  # (N,)
+    
+    # Create pixel coordinate grids (same for all images)
+    u, v = torch.meshgrid(torch.arange(W_pad, device=device, dtype=torch.float32), 
+                         torch.arange(H_pad, device=device, dtype=torch.float32), 
+                         indexing='xy')
+    
+    # Expand grids to batch dimension: (N, H_pad, W_pad)
+    u_batch = u.unsqueeze(0).expand(N, -1, -1)
+    v_batch = v.unsqueeze(0).expand(N, -1, -1)
+    
+    # Remove the single channel dimension from depth_maps
+    depth_batch = depth_maps.squeeze(1)  # (N, H_pad, W_pad)
+    
+    # Expand camera parameters to match spatial dimensions: (N, 1, 1) -> (N, H_pad, W_pad)
+    fx_expanded = fx.view(N, 1, 1).expand(-1, H_pad, W_pad)
+    fy_expanded = fy.view(N, 1, 1).expand(-1, H_pad, W_pad)
+    cx_expanded = cx.view(N, 1, 1).expand(-1, H_pad, W_pad)
+    cy_expanded = cy.view(N, 1, 1).expand(-1, H_pad, W_pad)
+    
+    # Create boundary masks for all images at once
+    H_actuals = torch.tensor([dim[0] for dim in im_current_dims], device=device)  # (N,)
+    W_actuals = torch.tensor([dim[1] for dim in im_current_dims], device=device)  # (N,)
+    
+    # Expand to match spatial dimensions
+    H_actuals_expanded = H_actuals.view(N, 1, 1).expand(-1, H_pad, W_pad)  # (N, H_pad, W_pad)
+    W_actuals_expanded = W_actuals.view(N, 1, 1).expand(-1, H_pad, W_pad)  # (N, H_pad, W_pad)
+    
+    # Create boundary mask for all images at once
+    boundary_mask_batch = (u_batch < W_actuals_expanded) & (v_batch < H_actuals_expanded)
+    
+    # Create overall valid mask: valid depth + within boundaries
+    valid_mask = (depth_batch > 0) & boundary_mask_batch
+    
+    # Batch compute 3D coordinates using vectorized operations
+    X = torch.where(valid_mask, 
+                    (u_batch - cx_expanded) * depth_batch / fx_expanded, 
+                    torch.zeros_like(depth_batch))
+    Y = torch.where(valid_mask, 
+                    (v_batch - cy_expanded) * depth_batch / fy_expanded, 
+                    torch.zeros_like(depth_batch))
+    Z = torch.where(valid_mask, 
+                    depth_batch, 
+                    torch.zeros_like(depth_batch))
+    
+    # Stack to create point maps (N, 3, H_pad, W_pad)
+    point_maps = torch.stack([X, Y, Z], dim=1)
+    
+    return point_maps

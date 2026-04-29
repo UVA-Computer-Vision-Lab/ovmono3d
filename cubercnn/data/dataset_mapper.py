@@ -16,6 +16,10 @@ from detectron2.structures import (
 
 class DatasetMapper3D(DatasetMapper):
 
+    def __init__(self, cfg, is_train=True):
+        super().__init__(cfg, is_train)
+        self.use_depth = cfg.INPUT.USE_DEPTH
+
     def __call__(self, dataset_dict):
         
         dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
@@ -33,6 +37,17 @@ class DatasetMapper3D(DatasetMapper):
         # but not efficient on large generic data structures due to the use of pickle & mp.Queue.
         # Therefore it's important to use torch.Tensor.
         dataset_dict["image"] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
+        if self.use_depth:
+            assert "depth_path" in dataset_dict, (
+                "INPUT.USE_DEPTH=True but the dataset has no depth_path. "
+                "Set DATASETS.FOLDER_NAME to a depth-augmented folder (e.g., Omni3D_unidepth) "
+                "and pre-generate depth maps via tools/unidepth_script.py or tools/metric3d_script.py."
+            )
+            depth = np.load(dataset_dict["depth_path"])
+            if depth.ndim == 2:
+                depth = depth[..., np.newaxis]
+            depth = transforms.apply_image(depth)
+            dataset_dict["depth"] = torch.as_tensor(np.ascontiguousarray(depth.transpose(2, 0, 1)))
 
         # no need for additoinal processing at inference
         if not self.is_train:
@@ -137,7 +152,11 @@ def annotations_to_instances(annos, image_size, unknown_categories):
     
     # add classes, 2D boxes, 3D boxes and poses
     target.gt_classes = torch.tensor([int(obj["category_id"]) for obj in annos], dtype=torch.int64)
-    target.gt_boxes = Boxes([BoxMode.convert(obj["bbox"], obj["bbox_mode"], BoxMode.XYXY_ABS) for obj in annos])
+
+    box_list = [BoxMode.convert(obj["bbox"], obj["bbox_mode"], BoxMode.XYXY_ABS) for obj in annos]
+    boxes_array = np.array(box_list, dtype=np.float32)
+    target.gt_boxes = Boxes(torch.as_tensor(boxes_array))
+
     target.gt_boxes3D = torch.FloatTensor([anno['center_cam_proj'] + anno['dimensions'] + anno['center_cam'] for anno in annos])
     target.gt_poses = torch.FloatTensor([anno['pose'] for anno in annos])
     

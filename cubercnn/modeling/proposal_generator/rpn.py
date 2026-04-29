@@ -315,7 +315,9 @@ def subsample_labels(
     
     # randomly select positive and negative examples
     if num_pos > 0 and matched_ious is not None:
-        perm1 = torch.multinomial(matched_ious[positive] + eps, num_pos)
+        # Index on CPU to avoid device mismatch on large tensors, then move back.
+        matched_ious_device = matched_ious[positive.cpu()].to(positive.device) + eps
+        perm1 = torch.multinomial(matched_ious_device, num_pos)
     else:
         perm1 = torch.randperm(positive.numel(), device=positive.device)[:num_pos]
     if num_neg > 0 and matched_ious is not None:

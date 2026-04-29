@@ -49,6 +49,9 @@ def get_omni3d_categories(dataset="omni3d"):
     elif dataset in [ "KITTI_test_novel"]:
         cats = set({'tram'})
         assert len(cats) == 1
+    elif dataset in [ "Cityscapes3D_test"]:
+        cats = set({'car', 'truck', 'motorcycle', 'bicycle', 'bus', 'trailer'})
+        assert len(cats) == 6
     else:
         raise ValueError("%s dataset is not registered." % (dataset))
 

@@ -31,6 +31,7 @@ MODEL:
     OUTPUT: 'dense'
     LAYER: -1
     RETURN_MULTILAYER: False
+    SCALE_FACTOR: [2.0, 1.0, 0.5]
   FPN:
     IN_FEATURE: 'last_feat'
     NORM: 'LN'

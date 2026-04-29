@@ -3,6 +3,7 @@ from detectron2.config import CfgNode as CN
 
 def get_cfg_defaults(cfg):
 
+    cfg.DATASETS.FOLDER_NAME = 'Omni3D'
     # A list of category names which will be used
     cfg.DATASETS.CATEGORY_NAMES = []
 
@@ -34,46 +35,61 @@ def get_cfg_defaults(cfg):
     cfg.DATASETS.TRUNC_2D_BOXES = True
 
     cfg.DATASETS.TEST_BASE = ('SUNRGBD_test', 'Hypersim_test', 'ARKitScenes_test', 'Objectron_test', 'KITTI_test', 'nuScenes_test') 
-    cfg.DATASETS.TEST_NOVEL = ('SUNRGBD_test_novel','ARKitScenes_test_novel', 'KITTI_test_novel') 
+    cfg.DATASETS.TEST_NOVEL = ('SUNRGBD_test_novel','ARKitScenes_test_novel', 'KITTI_test_novel')
     cfg.DATASETS.CATEGORY_NAMES_BASE = ('chair', 'table', 'cabinet', 'car', 'lamp', 'books', 'sofa', 'pedestrian', 'picture', 'window', 'pillow', 'truck', 'door', 'blinds', 'sink', 'shelves', 'television', 'shoes', 'cup', 'bottle', 'bookcase', 'laptop', 'desk', 'cereal box', 'floor mat', 'traffic cone', 'mirror', 'barrier', 'counter', 'camera', 'bicycle', 'toilet', 'bus', 'bed', 'refrigerator', 'trailer', 'box', 'oven', 'clothes', 'van', 'towel', 'motorcycle', 'night stand', 'stove', 'machine', 'stationery', 'bathtub', 'cyclist', 'curtain', 'bin')
     cfg.DATASETS.CATEGORY_NAMES_NOVEL = ('monitor', 'bag', 'dresser', 'board', 'printer', 'keyboard', 'painting', 'drawers', 'microwave', 'computer', 'kitchen pan', 'potted plant', 'tissues', 'rack', 'tray', 'toys', 'phone', 'podium', 'cart', 'soundsystem', 'fireplace', 'tram')
 
     # Oracle 2D files for evaluation
     cfg.DATASETS.ORACLE2D_FILES = CN()
+    
+    # 2D prompt source: 'gdino' or 'gdino_previous_metric'
+    # - 'gdino': Use Grounding DINO predictions (target-aware evaluation)
+    # - 'gdino_previous_metric': Use Grounding DINO predictions with previous metric
+    cfg.DATASETS.ORACLE2D_PROMPT = 'gdino'
+    
+    # Evaluation mode (deprecated, kept for backward compatibility)
     cfg.DATASETS.ORACLE2D_FILES.EVAL_MODE = 'target_aware'   # 'target_aware' or 'previous_metric'
     
-    # Create a configuration for each evaluation mode
-    for mode in ['target_aware', 'previous_metric']:
-        cfg.DATASETS.ORACLE2D_FILES[mode] = CN()
-        cfg.DATASETS.ORACLE2D_FILES[mode].novel = CN()
-        cfg.DATASETS.ORACLE2D_FILES[mode].base = CN()
+    # Oracle 2D file for the Novel class dataset
+    novel_datasets = {
+        'SUNRGBD_test_novel': 'sunrgbd',
+        'ARKitScenes_test_novel': 'arkitscenes', 
+        'KITTI_test_novel': 'kitti'
+    }
+    
+    # Oracle 2D file for the Base class dataset
+    base_datasets = {
+        'SUNRGBD_test': 'sunrgbd',
+        'Hypersim_test': 'hypersim',
+        'ARKitScenes_test': 'arkitscenes',
+        'Objectron_test': 'objectron',
+        'KITTI_test': 'kitti',
+        'nuScenes_test': 'nuscenes',
+        'Cityscapes3D_test': 'cityscapes3d'
+    }
+    
+    # Create configurations for different 2D prompt sources
+    for prompt_type in ['gdino', 'gdino_previous_metric']:
+        cfg.DATASETS.ORACLE2D_FILES[prompt_type] = CN()
+        cfg.DATASETS.ORACLE2D_FILES[prompt_type].novel = CN()
+        cfg.DATASETS.ORACLE2D_FILES[prompt_type].base = CN()
 
-        # Oracle 2D file for the Novel class dataset
-        novel_datasets = {
-            'SUNRGBD_test_novel': 'sunrgbd',
-            'ARKitScenes_test_novel': 'arkitscenes', 
-            'KITTI_test_novel': 'kitti'
-        }
-        
-        # Oracle 2D file for the Base class dataset
-        base_datasets = {
-            'SUNRGBD_test': 'sunrgbd',
-            'Hypersim_test': 'hypersim',
-            'ARKitScenes_test': 'arkitscenes',
-            'Objectron_test': 'objectron',
-            'KITTI_test': 'kitti',
-            'nuScenes_test': 'nuscenes'
-        }
+        if prompt_type == 'gdino':
+            novel_prefix = 'gdino'
+            base_prefix = 'gdino'
+        elif prompt_type == 'gdino_previous_metric':
+            novel_prefix = 'gdino_novel_previous_metric'
+            base_prefix = 'gdino_previous_eval'
 
-        # Set the file path for the novel class
         for dataset, dataset_name in novel_datasets.items():
-            prefix = 'gdino_novel_previous_metric' if mode == 'previous_metric' else 'gdino'
-            cfg.DATASETS.ORACLE2D_FILES[mode].novel[dataset] = f'datasets/Omni3D/{prefix}_{dataset_name}_novel_oracle_2d.json'
+            cfg.DATASETS.ORACLE2D_FILES[prompt_type].novel[dataset] = f'datasets/Omni3D/{novel_prefix}_{dataset_name}_novel_oracle_2d.json'
 
-        # Set the file path for the base class
         for dataset, dataset_name in base_datasets.items():
-            prefix = 'gdino_previous_eval' if mode == 'previous_metric' else 'gdino'
-            cfg.DATASETS.ORACLE2D_FILES[mode].base[dataset] = f'datasets/Omni3D/{prefix}_{dataset_name}_base_oracle_2d.json'
+            cfg.DATASETS.ORACLE2D_FILES[prompt_type].base[dataset] = f'datasets/Omni3D/{base_prefix}_{dataset_name}_base_oracle_2d.json'
+    
+    # Create backward compatibility mappings for old EVAL_MODE
+    cfg.DATASETS.ORACLE2D_FILES['target_aware'] = cfg.DATASETS.ORACLE2D_FILES['gdino']
+    cfg.DATASETS.ORACLE2D_FILES['previous_metric'] = cfg.DATASETS.ORACLE2D_FILES['gdino_previous_metric']
 
     cfg.MODEL.FPN.IN_FEATURE = None
     cfg.MODEL.FPN.SQUARE_PAD = 0
@@ -87,6 +103,7 @@ def get_cfg_defaults(cfg):
     cfg.MODEL.DINO.OUTPUT = 'dense'
     cfg.MODEL.DINO.LAYER = -1
     cfg.MODEL.DINO.RETURN_MULTILAYER = False
+    cfg.MODEL.DINO.SCALE_FACTOR = [2.0, 1.0, 0.5]
 
     cfg.MODEL.MAE = CN()
     cfg.MODEL.MAE.CHECKPOINT = 'facebook/vit-mae-base'
@@ -225,6 +242,7 @@ def get_cfg_defaults(cfg):
 
     cfg.INPUT.RANDOM_FLIP = "horizontal"
     cfg.INPUT.TRAIN_SET_PERCENTAGE = 1.0
+    cfg.INPUT.USE_DEPTH = False
     # When True, we will use localization uncertainty
     # as the new IoUness score in the RPN.
     cfg.MODEL.RPN.OBJECTNESS_UNCERTAINTY = 'IoUness'

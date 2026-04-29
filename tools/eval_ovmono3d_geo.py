@@ -82,7 +82,14 @@ def evaluate_predictions(
         
         with PathManager.open(pred_path, "rb") as f:
             predictions = torch.load(f)
-        
+
+        new_predictions = []
+        for pred_dict in predictions:
+            thres = 0.001
+            pred_dict["instances"] = [instance for instance in pred_dict["instances"] if instance["score"] > thres]
+            new_predictions.append(pred_dict)
+        predictions = new_predictions
+
         # Add predictions to evaluator
         eval_helper.add_predictions(dataset_name, predictions)
         
@@ -98,11 +105,12 @@ def evaluate_predictions(
 def main():
     """Main function demonstrating how to use the evaluation script"""
 
-    dataset_names = ["SUNRGBD_test_novel", "KITTI_test_novel", "ARKitScenes_test_novel"] 
+    dataset_names = ["SUNRGBD_test_novel", "KITTI_test_novel", "ARKitScenes_test_novel"]
     prediction_paths = {
-        "SUNRGBD_test_novel": "./output/ovmono3d_geo/SUNRGBD_test_novel.pth",
-        "KITTI_test_novel": "./output/ovmono3d_geo/KITTI_test_novel.pth",
-        "ARKitScenes_test_novel": "./output/ovmono3d_geo/ARKitScenes_test_novel.pth"
+        "SUNRGBD_test_novel": "./output/ovmono3d_geo_top100_gt/SUNRGBD_test_novel.pth",
+        "KITTI_test_novel": "./output/ovmono3d_geo_top100_gt/KITTI_test_novel.pth",
+        "ARKitScenes_test_novel": "./output/ovmono3d_geo_top100_gt/ARKitScenes_test_novel.pth",
+        "Cityscapes3D_test": "./output/ovmono3d_geo_top100/Cityscapes3D_test_previous_eval.pth",
     }
     
     # Setup filter settings
@@ -119,7 +127,7 @@ def main():
     }
     
     # Set paths
-    output_dir = "./output/ovmono3d_geo"
+    output_dir = "./output/ovmono3d_geo_top100"
     category_path = "./configs/category_meta.json"
     
     # Run evaluation

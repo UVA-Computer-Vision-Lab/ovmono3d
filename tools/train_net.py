@@ -78,7 +78,8 @@ def do_test(cfg, model, iteration='final', storage=None, mode="novel"):
         output_folder, 
         iter_label=iteration,
         only_2d=only_2d,
-        eval_categories = eval_categories
+        eval_categories = eval_categories,
+        folder_name=cfg.DATASETS.FOLDER_NAME
     )
     
     for dataset_name in dataset_names_test:
@@ -91,34 +92,30 @@ def do_test(cfg, model, iteration='final', storage=None, mode="novel"):
         '''
         Distributed Cube R-CNN inference
         '''
-        data_loader = build_detection_test_loader(cfg, dataset_name, mode)
+        data_mapper = DatasetMapper3D(cfg, is_train=False)  
+        data_loader = build_detection_test_loader(cfg, dataset_name, mode, mapper=data_mapper)
         results_json = inference_on_dataset(model, data_loader)
-
+        logger.info(f"results_json saved, begin evaluation")
         if comm.is_main_process():
-            
+
             '''
             Individual dataset evaluation
             '''
             eval_helper.add_predictions(dataset_name, results_json)
             eval_helper.save_predictions(dataset_name)
             eval_helper.evaluate(dataset_name)
+            logger.info(f"evaluate done")
 
             '''
             Optionally, visualize some instances
             '''
-            category_path = "configs/category_meta.json" # TODO: hard coded
+            category_path = "configs/category_meta.json"
             metadata = util.load_json(category_path)
-            category_names_official =  metadata['thing_classes']
-            # if mode == "novel":
-            #     category_path = "configs/category_meta.json" # TODO: hard coded
-            #     metadata = util.load_json(category_path)
-            #     category_names_official =  metadata['thing_classes']
-            # else:
-            #     category_names_official = MetadataCatalog.get('omni3d_model').thing_classes
+            category_names_official = metadata['thing_classes']
             instances = torch.load(os.path.join(output_folder, dataset_name, 'instances_predictions.pth'))
             log_str = vis.visualize_from_instances(
-                instances, data_loader.dataset, dataset_name, 
-                cfg.INPUT.MIN_SIZE_TEST, os.path.join(output_folder, dataset_name), 
+                instances, data_loader.dataset, dataset_name,
+                cfg.INPUT.MIN_SIZE_TEST, os.path.join(output_folder, dataset_name),
                 category_names_official, MetadataCatalog.get(dataset_name).thing_classes, iteration
             )
             logger.info(log_str)
@@ -308,8 +305,11 @@ def do_train(cfg, model, dataset_id_to_unknown_cats, dataset_id_to_src, resume=F
                 (do_eval and ((iteration + 1) % cfg.TEST.EVAL_PERIOD) == 0 and iteration != (max_iter - 1)):
 
                 logger.info('Starting test for iteration {}'.format(iteration+1))
-                do_test(cfg, model, iteration=iteration+1, storage=storage, mode='novel')
-                # do_test(cfg, model, iteration=iteration+1, storage=storage, mode='base')
+                if cfg.TEST.CAT_MODE == 'all':
+                    do_test(cfg, model, iteration=iteration+1, storage=storage, mode='novel')
+                    do_test(cfg, model, iteration=iteration+1, storage=storage, mode='base')
+                else:
+                    do_test(cfg, model, iteration=iteration+1, storage=storage, mode=cfg.TEST.CAT_MODE)
                 comm.synchronize()
                 
                 if not cfg.MODEL.USE_BN: 
@@ -356,13 +356,12 @@ def setup(args):
     filter_settings = data.get_filter_settings_from_cfg(cfg)
 
     for dataset_name in cfg.DATASETS.TRAIN:
-        simple_register(dataset_name, filter_settings, filter_empty=True)
-    
+        simple_register(dataset_name, filter_settings, folder_name=cfg.DATASETS.FOLDER_NAME, filter_empty=True)
     dataset_names_test = cfg.DATASETS.TEST
 
     for dataset_name in dataset_names_test:
         if not(dataset_name in cfg.DATASETS.TRAIN):
-            simple_register(dataset_name, filter_settings, filter_empty=False)
+            simple_register(dataset_name, filter_settings, folder_name=cfg.DATASETS.FOLDER_NAME, filter_empty=False)
     
     return cfg
 
@@ -391,8 +390,7 @@ def main(args):
         id_map = {int(key):val for key, val in metadata['thing_dataset_id_to_contiguous_id'].items()}
         MetadataCatalog.get('omni3d_model').thing_classes = thing_classes
         MetadataCatalog.get('omni3d_model').thing_dataset_id_to_contiguous_id  = id_map
-
-    else: 
+    else:
         dataset_id_to_unknown_cats, dataset_id_to_src, priors = setup_training_dataset(cfg, filter_settings)
 
     '''
@@ -405,11 +403,6 @@ def main(args):
 
         # build the training model.
         model = build_model(cfg, priors=priors)
-        # freeze the backbone
-        if hasattr(model.backbone, 'net'):
-            for param in model.backbone.net.parameters():
-                param.requires_grad = False
-
         if remaining_attempts == MAX_TRAINING_ATTEMPTS:
             # log the first attempt's settings.
             logger.info("Model:\n{}".format(model))
@@ -419,7 +412,6 @@ def main(args):
             DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
                 cfg.MODEL.WEIGHTS, resume=args.resume
             )
-
             if cfg.TEST.CAT_MODE == 'all':  
                 do_test(cfg, model, mode='novel')
                 do_test(cfg, model, mode='base')
@@ -446,12 +438,15 @@ def main(args):
             del model
 
     if remaining_attempts == 0:
-        # Exit if the model could not finish without diverging. 
+        # Exit if the model could not finish without diverging.
         raise ValueError('Training failed')
-        
-    do_test(cfg, model, mode='novel')
-    do_test(cfg, model, mode='base')
-    return 
+
+    if cfg.TEST.CAT_MODE == 'all':
+        do_test(cfg, model, mode='novel')
+        do_test(cfg, model, mode='base')
+    else:
+        do_test(cfg, model, mode=cfg.TEST.CAT_MODE)
+    return
 
 def allreduce_dict(input_dict, average=True):
     """

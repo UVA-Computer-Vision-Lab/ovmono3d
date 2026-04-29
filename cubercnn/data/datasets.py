@@ -98,34 +98,28 @@ def is_ignore(anno, filter_settings, image_height):
     # tightly annotated 2D boxes are not always available.
     if filter_settings['modal_2D_boxes'] and 'bbox2D_tight' in anno and anno['bbox2D_tight'][0] != -1:
         bbox2D =  BoxMode.convert(anno['bbox2D_tight'], BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
-
     # truncated projected 2D boxes are also not always available.
     elif filter_settings['trunc_2D_boxes'] and 'bbox2D_trunc' in anno and not np.all([val==-1 for val in anno['bbox2D_trunc']]):
         bbox2D =  BoxMode.convert(anno['bbox2D_trunc'], BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
-
     # use the projected 3D --> 2D box, which requires a visible 3D cuboid.
     elif 'bbox2D_proj' in anno:
         bbox2D =  BoxMode.convert(anno['bbox2D_proj'], BoxMode.XYXY_ABS, BoxMode.XYWH_ABS)
-
     else:
         bbox2D = anno['bbox']
 
     ignore |= bbox2D[3] <= filter_settings['min_height_thres']*image_height
     ignore |= bbox2D[3] >= filter_settings['max_height_thres']*image_height
-        
     ignore |= (anno['truncation'] >=0 and anno['truncation'] >= filter_settings['truncation_thres'])
     ignore |= (anno['visibility'] >= 0 and anno['visibility'] <= filter_settings['visibility_thres'])
-    
     if 'ignore_names' in filter_settings:
         ignore |= anno['category_name'] in filter_settings['ignore_names']
-
     return ignore
 
 
-def simple_register(dataset_name, filter_settings, filter_empty=False, datasets_root_path=None):
+def simple_register(dataset_name, filter_settings, folder_name='Omni3D', filter_empty=False, datasets_root_path=None):
 
     if datasets_root_path is None:
-        datasets_root_path = path_to_json = os.path.join('datasets', 'Omni3D',)
+        datasets_root_path = path_to_json = os.path.join('datasets', folder_name,)
     
     path_to_json = os.path.join(datasets_root_path, dataset_name + '.json')
     path_to_image_root = 'datasets'
@@ -164,7 +158,6 @@ class Omni3D(COCO):
             dataset = json.load(open(annotation_file, 'r'))
             assert type(dataset)==dict, 'annotation file format {} not supported'.format(type(dataset))
             print('Done (t={:0.2f}s)'.format(time.time()- tic))
-
             if type(dataset['info']) == list:
                 dataset['info'] = dataset['info'][0]
                 
@@ -338,7 +331,7 @@ def load_omni3d_json(json_file, image_root, dataset_name, filter_settings, filte
     thing_classes = [c["name"] for c in sorted(cats, key=lambda x: x["id"])]
     meta.thing_classes = thing_classes
     if dataset_name.endswith(("_novel", "_test")):
-        category_path = "configs/category_meta.json" # TODO: hard coded
+        category_path = "configs/category_meta.json"
 
         metadata = util.load_json(category_path)
 
@@ -385,10 +378,13 @@ def load_omni3d_json(json_file, image_root, dataset_name, filter_settings, filte
 
         record = {}
         record["file_name"] = os.path.join(image_root, img_dict["file_path"])
+
         record["dataset_id"] = img_dict["dataset_id"]
         record["height"] = img_dict["height"]
         record["width"] = img_dict["width"]
         record["K"] = img_dict["K"]
+        if "depth_path" in img_dict:
+            record["depth_path"] = os.path.join(image_root, img_dict["depth_path"])
 
         # store optional keys when available
         for img_key in img_keys_optional:

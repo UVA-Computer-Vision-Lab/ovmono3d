@@ -5,7 +5,7 @@ import numpy as np
 from detectron2.layers import ShapeSpec, batched_nms
 from detectron2.utils.visualizer import Visualizer
 from detectron2.data.detection_utils import convert_image_to_rgb
-from detectron2.structures import Instances
+from detectron2.structures import Instances, ImageList
 from detectron2.utils.events import get_event_storage
 from detectron2.data import MetadataCatalog
 
@@ -25,6 +25,40 @@ from cubercnn import util, vis
 @META_ARCH_REGISTRY.register()
 class RCNN3D(GeneralizedRCNN):
     
+    def __init__(
+        self,
+        *,
+        backbone,
+        proposal_generator,
+        roi_heads,
+        pixel_mean,
+        pixel_std,
+        input_format: str = "BGR",
+        vis_period: int = 0,
+        use_depth: bool = False,
+    ):
+        """
+        Args:
+            backbone: a backbone module, must follow detectron2's backbone interface
+            proposal_generator: a module that generates object proposals from feature maps
+            roi_heads: a ROI head that performs per-region computation
+            pixel_mean, pixel_std: list or tuple with #channels element, representing
+                the per-channel mean and std to be used to normalize the input image
+            input_format: describe the meaning of channels of input. Needed by visualization
+            vis_period: the period to run visualization. Set to 0 to disable.
+            use_depth: whether to use depth input for processing
+        """
+        super().__init__(
+            backbone=backbone,
+            proposal_generator=proposal_generator,
+            roi_heads=roi_heads,
+            pixel_mean=pixel_mean,
+            pixel_std=pixel_std,
+            input_format=input_format,
+            vis_period=vis_period,
+        )
+        self.use_depth = use_depth
+
     @classmethod
     def from_config(cls, cfg, priors=None):
         backbone = build_backbone(cfg, priors=priors)
@@ -36,6 +70,7 @@ class RCNN3D(GeneralizedRCNN):
             "vis_period": cfg.VIS_PERIOD,
             "pixel_mean": cfg.MODEL.PIXEL_MEAN,
             "pixel_std": cfg.MODEL.PIXEL_STD,
+            "use_depth": cfg.INPUT.USE_DEPTH,
         }
 
     def forward(self, batched_inputs: List[Dict[str, torch.Tensor]]):
@@ -44,6 +79,14 @@ class RCNN3D(GeneralizedRCNN):
             return self.inference(batched_inputs)
 
         images = self.preprocess_image(batched_inputs)
+        depths = None
+        if self.use_depth and "depth" in batched_inputs[0]:
+            depths = [self._move_to_current_device(x["depth"]) for x in batched_inputs]
+            depths = ImageList.from_tensors(
+                depths,
+                self.backbone.size_divisibility,
+                padding_constraints=self.backbone.padding_constraints,
+            )
 
         # scaling factor for the sample relative to its original scale
         # e.g., how much has the image been upsampled by? or downsampled?
@@ -58,12 +101,15 @@ class RCNN3D(GeneralizedRCNN):
             gt_instances = None
 
         features = self.backbone(images.tensor)
+
         proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
 
+        prompt_depth = depths.tensor if (self.use_depth and depths is not None) else None
         instances, detector_losses = self.roi_heads(
             images, features, proposals, 
             Ks, im_scales_ratio, 
-            gt_instances
+            gt_instances,
+            prompt_depth
         )
 
         if self.vis_period > 0:
@@ -85,7 +131,14 @@ class RCNN3D(GeneralizedRCNN):
         assert not self.training
 
         images = self.preprocess_image(batched_inputs)
-
+        depths = None
+        if self.use_depth and "depth" in batched_inputs[0]:
+            depths = [self._move_to_current_device(x["depth"]) for x in batched_inputs]
+            depths = ImageList.from_tensors(
+                depths,
+                self.backbone.size_divisibility,
+                padding_constraints=self.backbone.padding_constraints,
+            )
         # scaling factor for the sample relative to its original scale
         # e.g., how much has the image been upsampled by? or downsampled?
         im_scales_ratio = [info['height'] / im.shape[1] for (info, im) in zip(batched_inputs, images)]
@@ -95,19 +148,21 @@ class RCNN3D(GeneralizedRCNN):
 
         features = self.backbone(images.tensor)
 
+        prompt_depth = depths.tensor if (self.use_depth and depths is not None) else None
+        
         # Pass oracle 2D boxes into the RoI heads
-        if type(batched_inputs == list) and np.any(['oracle2D' in b for b in batched_inputs]):
+        if isinstance(batched_inputs, list) and np.any(['oracle2D' in b for b in batched_inputs]):
             oracles = [b['oracle2D'] for b in batched_inputs]
-            results, _ = self.roi_heads(images, features, oracles, Ks, im_scales_ratio, None)
+            results, _ = self.roi_heads(images, features, oracles, Ks, im_scales_ratio, None, prompt_depth)
         
         # normal inference
         else:
             proposals, _ = self.proposal_generator(images, features, None)
             if np.any(['category_list' in b for b in batched_inputs]):
-                # Gronding DINO inference is only supported to one image at one batch
-                results, _ = self.roi_heads(images, features, proposals, Ks, im_scales_ratio, None, category_list=batched_inputs[0]["category_list"]) 
+                # Grounding DINO inference only supports a single image per batch.
+                results, _ = self.roi_heads(images, features, proposals, Ks, im_scales_ratio, None, prompt_depth, category_list=batched_inputs[0]["category_list"])
             else:
-                results, _ = self.roi_heads(images, features, proposals, Ks, im_scales_ratio, None)
+                results, _ = self.roi_heads(images, features, proposals, Ks, im_scales_ratio, None, prompt_depth)
 
         if do_postprocess:
             assert not torch.jit.is_scripting(), "Scripting is not supported for postprocess."
@@ -148,18 +203,41 @@ class RCNN3D(GeneralizedRCNN):
             '''
             Visualize the 2D GT and proposal predictions
             '''
+            # Get GT class labels for 2D visualization
+            gt_2d_classes = input["instances"].gt_classes
+            gt_2d_labels = [self.thing_classes[cls_idx] if cls_idx >= 0 and cls_idx < self.num_classes else 'unknown' 
+                           for cls_idx in gt_2d_classes]
+            
             v_gt = Visualizer(img, None)
-            v_gt = v_gt.overlay_instances(boxes=input["instances"].gt_boxes)
+            v_gt = v_gt.overlay_instances(
+                boxes=input["instances"].gt_boxes,
+                labels=gt_2d_labels
+            )
             anno_img = v_gt.get_image()
-            box_size = min(len(prop.proposal_boxes), max_vis_prop)
+            
+            # Add 2D visualization with scores and classes for instances
+            keep_2d = batched_nms(
+                instances_i.pred_boxes.tensor, 
+                instances_i.scores, 
+                torch.zeros(len(instances_i.scores), dtype=torch.long, device=instances_i.scores.device), 
+                self.roi_heads.box_predictor.test_nms_thresh
+            )
+            keep_2d = keep_2d[:max_vis_prop]
+            
+            pred_2d_boxes = instances_i.pred_boxes[keep_2d]
+            pred_2d_scores = instances_i.scores[keep_2d]
+            pred_2d_classes = instances_i.pred_classes[keep_2d]
+            pred_2d_labels = ['{} {:.2f}'.format(self.thing_classes[cls_idx], score) for cls_idx, score in zip(pred_2d_classes, pred_2d_scores)]
+            
             v_pred = Visualizer(img, None)
             v_pred = v_pred.overlay_instances(
-                boxes=prop.proposal_boxes[0:box_size].tensor.cpu().numpy()
+                boxes=pred_2d_boxes.tensor.detach().cpu().numpy(),
+                labels=pred_2d_labels
             )
             prop_img = v_pred.get_image()
             vis_img_rpn = np.concatenate((anno_img, prop_img), axis=1)
             vis_img_rpn = vis_img_rpn.transpose(2, 0, 1)
-            storage.put_image("Left: GT 2D bounding boxes; Right: Predicted 2D proposals", vis_img_rpn)
+            storage.put_image("Left: GT 2D bounding boxes; Right: Predicted 2D boxes with scores/classes", vis_img_rpn)
 
             '''
             Visualize the 3D GT and predictions
@@ -254,7 +332,9 @@ def build_model(cfg, priors=None):
     Note that it does not load any weights from ``cfg``.
     """
     meta_arch = cfg.MODEL.META_ARCHITECTURE
-    model = META_ARCH_REGISTRY.get(meta_arch)(cfg, priors=priors)
+    model_cls = META_ARCH_REGISTRY.get(meta_arch)
+    model_kwargs = model_cls.from_config(cfg, priors=priors)
+    model = model_cls(**model_kwargs)
     model.to(torch.device(cfg.MODEL.DEVICE))
     _log_api_usage("modeling.meta_arch." + meta_arch)
     return model

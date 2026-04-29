@@ -197,7 +197,8 @@ class Omni3DEvaluationHelper:
             output_folder,
             iter_label='-',
             only_2d=False,
-            eval_categories=None
+            eval_categories=None,
+            folder_name='Omni3D'
         ):
         """
         A helper class to initialize, evaluate and summarize Omni3D metrics. 
@@ -219,6 +220,7 @@ class Omni3DEvaluationHelper:
             output_folder (str): the output folder where results can be stored to disk.
             iter_label (str): an optional iteration/label used within the summary
             only_2d (bool): whether the evaluation mode should be 2D or 2D and 3D.
+            folder_name (str): the folder name for datasets (default: 'Omni3D')
         """
         
         self.dataset_names = dataset_names
@@ -226,6 +228,7 @@ class Omni3DEvaluationHelper:
         self.output_folder = output_folder
         self.iter_label = iter_label
         self.only_2d = only_2d
+        self.folder_name = folder_name
 
         # Each dataset evaluator is stored here
         self.evaluators = OrderedDict()
@@ -245,6 +248,7 @@ class Omni3DEvaluationHelper:
         self.evals_per_cat_area2D = {}
         self.evals_per_cat_area3D = {}
         self.evals_nhd_accumulators3D = {}
+        self.evals_iou3d_accumulators3D = {}
         self.output_folders = {
             dataset_name: os.path.join(self.output_folder, dataset_name)
             for dataset_name in dataset_names
@@ -254,7 +258,7 @@ class Omni3DEvaluationHelper:
             filter_settings['category_names'] = list(eval_categories)
             # register any datasets that need it
             if MetadataCatalog.get(dataset_name).get('json_file') is None:
-                simple_register(dataset_name, filter_settings, filter_empty=False)
+                simple_register(dataset_name, filter_settings, folder_name=self.folder_name, filter_empty=False)
             
             # create an individual dataset evaluator
             self.evaluators[dataset_name] = Omni3DEvaluator(
@@ -322,16 +326,16 @@ class Omni3DEvaluationHelper:
         Args:
             dataset_name (str): the dataset split name which should be evalated.
         """
-        
+        logger = logging.getLogger(__name__)
+
         if not dataset_name in self.results:
-            
             # run evaluation and cache
             self.results[dataset_name] = self.evaluators[dataset_name].evaluate()
 
         results = self.results[dataset_name]
 
         logger.info('\n'+results['log_str_2D'].replace('mode=2D', '{} iter={} mode=2D'.format(dataset_name, self.iter_label)))
-            
+
         # store the partially accumulated evaluations per category per area
         for key, item in results['bbox_2D_evals_per_cat_area'].items():
             if not key in self.evals_per_cat_area2D:
@@ -344,18 +348,27 @@ class Omni3DEvaluationHelper:
                 if not key in self.evals_per_cat_area3D:
                     self.evals_per_cat_area3D[key] = []
                 self.evals_per_cat_area3D[key] += item
+
             for key, item in results["bbox_3D_nhd_accumulators"].items():
                 if not key in self.evals_nhd_accumulators3D:
                     self.evals_nhd_accumulators3D[key] = []
                 self.evals_nhd_accumulators3D[key] += item
+
+            # Process IoU3D accumulators
+            if "bbox_3D_iou3d_accumulators" in results:
+                for key, item in results["bbox_3D_iou3d_accumulators"].items():
+                    if not key in self.evals_iou3d_accumulators3D:
+                        self.evals_iou3d_accumulators3D[key] = []
+                    self.evals_iou3d_accumulators3D[key] += item
+
             logger.info('\n'+results['log_str_3D'].replace('mode=3D', '{} iter={} mode=3D'.format(dataset_name, self.iter_label)))
 
         # full model category names
         category_names = self.filter_settings['category_names']
 
-        # The set of categories present in the dataset; there should be no duplicates 
+        # The set of categories present in the dataset; there should be no duplicates
         categories = {cat for cat in category_names if 'AP-{}'.format(cat) in results['bbox_2D']}
-        assert len(categories) == len(set(categories)) 
+        assert len(categories) == len(set(categories))
 
         # default are all NaN
         general_2D_AP, general_2D_AR, general_3D_AP, general_3D_AR, omni_2D_AP, omni_2D_AR, omni_3D_AP, omni_3D_AR = (np.nan,) * 8
@@ -375,7 +388,7 @@ class Omni3DEvaluationHelper:
             if not self.only_2d:
                 omni_3D_AP = np.mean([results['bbox_3D']['AP-{}'.format(cat)] for cat in omni3d_dataset_categories])
                 omni_3D_AR = np.mean([results['bbox_3D']['AR-{}'.format(cat)] for cat in omni3d_dataset_categories])
-        
+
         self.results_omni3d[dataset_name] = {"iters": self.iter_label, "AP2D": omni_2D_AP, "AR2D": omni_2D_AR, "AP3D": omni_3D_AP, "AR3D": omni_3D_AR}
 
         # Performance analysis
@@ -419,6 +432,8 @@ class Omni3DEvaluationHelper:
         which were aggregated and cached while evaluating individually. 
         This process simply re-accumulate and summarizes them. 
         '''
+        
+        logger = logging.getLogger(__name__)
 
         # First, double check that we have all the evaluations
         for dataset_name in self.dataset_names:
@@ -426,7 +441,7 @@ class Omni3DEvaluationHelper:
                 self.evaluate(dataset_name)
 
         if self.dataset_names[0].endswith(("_novel", "_test")):
-            category_path = "configs/category_meta.json" # TODO: hard coded
+            category_path = "configs/category_meta.json"
             metadata = util.load_json(category_path)
             thing_classes = metadata['thing_classes']
             catId2contiguous = {int(key):val for key, val in metadata['thing_dataset_id_to_contiguous_id'].items()}
@@ -528,11 +543,18 @@ class Omni3DEvaluationHelper:
             "AP3D-N": extras_APn, "AP3D-M": extras_APm, "AP3D-F": extras_APf, 
             "AR2D": general_2D_AR, "AR3D": general_3D_AR
         }
-        overall_NHD = np.mean(self.evals_nhd_accumulators3D["overall"])
-        disent_xy_nhd = np.mean(self.evals_nhd_accumulators3D["xy"])
-        disent_z_nhd = np.mean(self.evals_nhd_accumulators3D["z"])
-        disent_dims_nhd = np.mean(self.evals_nhd_accumulators3D["dimensions"])
-        disent_pose_nhd = np.mean(self.evals_nhd_accumulators3D["pose"])
+        overall_NHD = np.mean(self.evals_nhd_accumulators3D["overall"]) if "overall" in self.evals_nhd_accumulators3D and self.evals_nhd_accumulators3D["overall"] else np.nan
+        disent_xy_nhd = np.mean(self.evals_nhd_accumulators3D["xy"]) if "xy" in self.evals_nhd_accumulators3D and self.evals_nhd_accumulators3D["xy"] else np.nan
+        disent_z_nhd = np.mean(self.evals_nhd_accumulators3D["z"]) if "z" in self.evals_nhd_accumulators3D and self.evals_nhd_accumulators3D["z"] else np.nan
+        disent_dims_nhd = np.mean(self.evals_nhd_accumulators3D["dimensions"]) if "dimensions" in self.evals_nhd_accumulators3D and self.evals_nhd_accumulators3D["dimensions"] else np.nan
+        disent_pose_nhd = np.mean(self.evals_nhd_accumulators3D["pose"]) if "pose" in self.evals_nhd_accumulators3D and self.evals_nhd_accumulators3D["pose"] else np.nan
+        
+        # Calculate IoU3D metrics
+        overall_iou3d = np.mean(self.evals_iou3d_accumulators3D["overall"]) if "overall" in self.evals_iou3d_accumulators3D and self.evals_iou3d_accumulators3D["overall"] else np.nan
+        disent_xy_iou3d = np.mean(self.evals_iou3d_accumulators3D["xy"]) if "xy" in self.evals_iou3d_accumulators3D and self.evals_iou3d_accumulators3D["xy"] else np.nan
+        disent_z_iou3d = np.mean(self.evals_iou3d_accumulators3D["z"]) if "z" in self.evals_iou3d_accumulators3D and self.evals_iou3d_accumulators3D["z"] else np.nan
+        disent_dims_iou3d = np.mean(self.evals_iou3d_accumulators3D["dimensions"]) if "dimensions" in self.evals_iou3d_accumulators3D and self.evals_iou3d_accumulators3D["dimensions"] else np.nan
+        disent_pose_iou3d = np.mean(self.evals_iou3d_accumulators3D["pose"]) if "pose" in self.evals_iou3d_accumulators3D and self.evals_iou3d_accumulators3D["pose"] else np.nan
 
         # Omni3D Outdoor performance
         omni_2D, omni_3D, omni_2D_AR, omni_3D_AR = (np.nan,) * 4
@@ -601,11 +623,19 @@ class Omni3DEvaluationHelper:
             utils_logperf.print_ap_hard_easy_for_novel(easy_metrics_formatted, hard_metrics_formatted)
         utils_logperf.print_ap_analysis_histogram(self.results_analysis)
         utils_logperf.print_ap_omni_histogram(self.results_omni3d)
+        
         logger.info(f"Overall NHD: {overall_NHD}")
         logger.info(f"Disentangled XY NHD: {disent_xy_nhd}")
         logger.info(f"Disentangled  Z NHD: {disent_z_nhd}")
         logger.info(f"Disentangled Dimensions NHD: {disent_dims_nhd}")
         logger.info(f"Disentangled Pose NHD: {disent_pose_nhd}")
+
+        logger.info(f"Overall IoU3D: {overall_iou3d}")
+        logger.info(f"Disentangled XY IoU3D: {disent_xy_iou3d}")
+        logger.info(f"Disentangled  Z IoU3D: {disent_z_iou3d}")
+        logger.info(f"Disentangled Dimensions IoU3D: {disent_dims_iou3d}")
+        logger.info(f"Disentangled Pose IoU3D: {disent_pose_iou3d}")
+        
     def add_cat_name_to_predictions(self, predictions, category_names_official):
         for img in predictions:
             for instance in img["instances"]:
@@ -888,11 +918,20 @@ class Omni3DEvaluator(COCOEvaluator):
         }
         if mode == "3D":
             addtional_metrics = ["overall", "xy", "z", "dimensions", "pose"]
+            # Add NHD metrics
             for metric in addtional_metrics:
                 if metric == "overall":
                     results[metric + "_NHD"] = float(omni_eval.eval["average_nhd"][metric] if omni_eval.eval["average_nhd"][metric] >= 0 else "nan")
                 else:
                     results["disent_"+metric + "_NHD"] = float(omni_eval.eval["average_nhd"][metric] if omni_eval.eval["average_nhd"][metric] >= 0 else "nan")
+            
+            # Add IoU3D metrics
+            if "average_iou3d" in omni_eval.eval:
+                for metric in addtional_metrics:
+                    if metric == "overall":
+                        results[metric + "_IoU3D"] = float(omni_eval.eval["average_iou3d"][metric] if omni_eval.eval["average_iou3d"][metric] >= 0 else "nan")
+                    else:
+                        results["disent_"+metric + "_IoU3D"] = float(omni_eval.eval["average_iou3d"][metric] if omni_eval.eval["average_iou3d"][metric] >= 0 else "nan")
         self._logger.info(
             "Evaluation results for {} in {} mode: \n".format(iou_type, mode)
             + create_small_table(results)
@@ -953,7 +992,7 @@ class Omni3DEvaluator(COCOEvaluator):
         omni_results = list(itertools.chain(*[x["instances"] for x in predictions]))
         tasks = self._tasks or self._tasks_from_predictions(omni_results)
         if self._metadata.name.endswith(("_novel", "_test")):
-            category_path = "configs/category_meta.json" # TODO: hard coded
+            category_path = "configs/category_meta.json"
             metadata = util.load_json(category_path)
             omni3d_global_categories = metadata['thing_classes']
         else:
@@ -1038,6 +1077,8 @@ class Omni3DEvaluator(COCOEvaluator):
                 self._results[task + "_" + format(mode) + '_evals_per_cat_area'] = evals[mode].evals_per_cat_area
                 if mode == "3D":
                     self._results[task + "_" + format(mode) + '_nhd_accumulators'] = evals[mode].eval["nhd_accumulators"]
+                    if "iou3d_accumulators" in evals[mode].eval:
+                        self._results[task + "_" + format(mode) + '_iou3d_accumulators'] = evals[mode].eval["iou3d_accumulators"]
             self._results["log_str_2D"] = log_strs["2D"]
             
             if "3D" in log_strs:
@@ -1890,6 +1931,69 @@ def disentangled_nhd(pred_box, gt_box, components):
     return nhd_results
 
 
+def calculate_iou3d_from_vertices(pred_vertices, gt_vertices):
+    """
+    Calculate 3D IoU between two boxes given their vertices.
+    Args:
+        pred_vertices: 8x3 array of predicted box vertices
+        gt_vertices: 8x3 array of ground truth box vertices
+    Returns:
+        IoU3D value
+    """
+    # Convert to torch tensors for IoU calculation
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    pred_tensor = torch.tensor(pred_vertices, device=device, dtype=torch.float32).unsqueeze(0)
+    gt_tensor = torch.tensor(gt_vertices, device=device, dtype=torch.float32).unsqueeze(0)
+    
+    # Calculate IoU using box3d_overlap function
+    iou = box3d_overlap(pred_tensor, gt_tensor).cpu().numpy()[0, 0]
+    return iou
+
+
+def disentangled_iou3d(pred_box, gt_box, components):
+    """
+    Calculate disentangled IoU3D for each component (xy, z, dimensions, pose).
+    Args:
+        pred_box: Dictionary containing predicted box parameters (xy, z, dimensions, pose).
+        gt_box: Dictionary containing ground truth box parameters (xy, z, dimensions, pose).
+        components: List of components to disentangle (e.g., ["xy", "z", "dimensions", "pose"]).
+    Returns:
+        Dictionary of disentangled IoU3D values for each component and overall IoU3D.
+    """
+    iou3d_results = {}
+    
+    # Calculate un-disentangled IoU3D (overall IoU3D)
+    pred_vertices, _ = get_cuboid_verts_faces(box3d=[pred_box['xy'][0], pred_box['xy'][1], pred_box['z'], *pred_box['dimensions']], R=pred_box['pose'])
+    gt_vertices, _ = get_cuboid_verts_faces(box3d=[gt_box['xy'][0], gt_box['xy'][1], gt_box['z'], *gt_box['dimensions']], R=gt_box['pose'])
+    
+    # Convert vertices to numpy arrays
+    pred_vertices = np.array(pred_vertices)
+    gt_vertices = np.array(gt_vertices)
+    
+    iou3d_results['overall'] = calculate_iou3d_from_vertices(pred_vertices, gt_vertices)
+
+    # Iterate over each component to calculate disentangled IoU3D
+    for component in components:
+        # Create a modified version of the predicted box that uses GT values for all but the current component
+        modified_pred_box = pred_box.copy()
+        for comp in components:
+            if comp != component:
+                modified_pred_box[comp] = gt_box[comp]
+        
+        # Get vertices of the modified predicted box and GT box
+        pred_vertices, _ = get_cuboid_verts_faces(box3d=[modified_pred_box['xy'][0], modified_pred_box['xy'][1], modified_pred_box['z'], *modified_pred_box['dimensions']], R=modified_pred_box['pose'])
+        gt_vertices, _ = get_cuboid_verts_faces(box3d=[gt_box['xy'][0], gt_box['xy'][1], gt_box['z'], *gt_box['dimensions']], R=gt_box['pose'])
+
+        # Convert vertices to numpy arrays
+        pred_vertices = np.array(pred_vertices)
+        gt_vertices = np.array(gt_vertices)
+        
+        # Calculate IoU3D between modified prediction and GT
+        iou3d_results[component] = calculate_iou3d_from_vertices(pred_vertices, gt_vertices)
+    
+    return iou3d_results
+
+
 class Omni3DevalWithNHD(Omni3Deval):
     def __init__(self, *args, iou_threshold_for_disentangled_metrics=0.5, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1935,9 +2039,10 @@ class Omni3DevalWithNHD(Omni3Deval):
             if best_iou >= self.iou_threshold:
                 matched_pairs.append((dt[dt_idx], gt[best_gt_idx]))
 
-        # Calculate NHD and disentangled metrics for each matched pair
+        # Calculate NHD and IoU3D disentangled metrics for each matched pair
         components = ["xy", "z", "dimensions", "pose"]
         nhd_metrics = []
+        iou3d_metrics = []
         for dt_bbox, gt_bbox in matched_pairs:
             pred_box = {
                 "xy": dt_bbox["center_cam"][:2],
@@ -1951,10 +2056,15 @@ class Omni3DevalWithNHD(Omni3Deval):
                 "dimensions": gt_bbox["dimensions"],
                 "pose": gt_bbox["R_cam"]
             }
-            disentangled_results = disentangled_nhd(pred_box, gt_box, components)
-            nhd_metrics.append(disentangled_results)
+            # Calculate both NHD and IoU3D metrics
+            disentangled_nhd_results = disentangled_nhd(pred_box, gt_box, components)
+            disentangled_iou3d_results = disentangled_iou3d(pred_box, gt_box, components)
+            
+            nhd_metrics.append(disentangled_nhd_results)
+            iou3d_metrics.append(disentangled_iou3d_results)
 
         result["nhd_metrics"] = nhd_metrics
+        result["iou3d_metrics"] = iou3d_metrics
         return result
     
 
@@ -1962,31 +2072,40 @@ class Omni3DevalWithNHD(Omni3Deval):
         """
         Accumulate evaluation results by concatenating NHD metrics for the entire dataset.
         """
-        # Call the parent class accumulate method
         super().accumulate(p)
         if self.mode == "2D":
-            return 
-        # Initialize accumulators for NHD metrics
+            return
+
+        # Initialize accumulators for NHD and IoU3D metrics
         self.eval["nhd_accumulators"] = {"overall": [], "xy": [], "z": [], "dimensions": [], "pose": []}
+        self.eval["iou3d_accumulators"] = {"overall": [], "xy": [], "z": [], "dimensions": [], "pose": []}
 
         # Iterate over the evaluated images to collect NHD metrics
-        for eval_img in self.evalImgs:
+        for img_idx, eval_img in enumerate(self.evalImgs):
             if eval_img is None:
                 continue
+
             if "nhd_metrics" in eval_img:
                 for nhd_metric in eval_img["nhd_metrics"]:
                     for key in self.eval["nhd_accumulators"]:
                         if key in nhd_metric:
                             self.eval["nhd_accumulators"][key].append(nhd_metric[key])
 
+            # Also accumulate IoU3D metrics
+            if "iou3d_metrics" in eval_img:
+                for iou3d_metric in eval_img["iou3d_metrics"]:
+                    for key in self.eval["iou3d_accumulators"]:
+                        if key in iou3d_metric:
+                            self.eval["iou3d_accumulators"][key].append(iou3d_metric[key])
+
     def summarize(self):
         """
         Compute and display summary metrics for evaluation results, including average disentangled NHD.
         """
-        # Call the parent class summarize method
         log_str = super().summarize()
         if self.mode == "2D":
             return log_str
+
         # Calculate average NHD for each component
         avg_nhd_results = {}
         for key, values in self.eval["nhd_accumulators"].items():
@@ -1994,14 +2113,27 @@ class Omni3DevalWithNHD(Omni3Deval):
                 avg_nhd_results[key] = np.mean(values)
             else:
                 avg_nhd_results[key] = float('nan')
-
-        # Store the average NHD results in the evaluation summary
         self.eval["average_nhd"] = avg_nhd_results
+
+        # Calculate average IoU3D for each component
+        avg_iou3d_results = {}
+        for key, values in self.eval["iou3d_accumulators"].items():
+            if values:
+                avg_iou3d_results[key] = np.mean(values)
+            else:
+                avg_iou3d_results[key] = float('nan')
+        self.eval["average_iou3d"] = avg_iou3d_results
 
         # Add the average disentangled NHD metrics to the log string
         if "average_nhd" in self.eval:
             log_str += "\nAverage Disentangled NHD Metrics:\n"
             for component, value in self.eval["average_nhd"].items():
+                log_str += f"  {component}: {value:.4f}\n"
+
+        # Add the average disentangled IoU3D metrics to the log string
+        if "average_iou3d" in self.eval:
+            log_str += "\nAverage Disentangled IoU3D Metrics:\n"
+            for component, value in self.eval["average_iou3d"].items():
                 log_str += f"  {component}: {value:.4f}\n"
 
         return log_str

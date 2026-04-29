@@ -108,7 +108,7 @@ def build_dino_backbone(cfg, input_shape: ShapeSpec, priors=None):
 
     in_feature = cfg.MODEL.FPN.IN_FEATURE
     out_channels = cfg.MODEL.FPN.OUT_CHANNELS
-    scale_factors = (2.0, 1.0, 0.5)
+    scale_factors = cfg.MODEL.DINO.SCALE_FACTOR
     backbone = SimpleFeaturePyramid(
         net=bottom_up,
         in_feature=in_feature,

@@ -22,3 +22,5 @@ ovmono3d
 *.ipynb
 *.pth
 *.zip
+pyrightconfig.json
+.claude/

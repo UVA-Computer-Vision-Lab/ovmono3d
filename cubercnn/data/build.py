@@ -43,10 +43,13 @@ def xywh_to_xyxy(bbox):
 
 
 def merge_oracle2d_to_detection_dicts(dataset_dicts, oracle2d):
+    logger = logging.getLogger(__name__)
+
     for dataset, oracle in zip(dataset_dicts, oracle2d):
+        logger.info(f"Loading Oracle 2D file: {oracle}")
         with open(oracle, 'r') as file:
             oracle_data = json.load(file)
-        for data_dict, oracle_dict in zip(dataset,oracle_data):
+        for data_dict, oracle_dict in zip(dataset, oracle_data):
             assert data_dict['image_id'] == oracle_dict['image_id']
             data_dict["oracle2D"] = {"gt_bbox2D": torch.tensor([xywh_to_xyxy(instance["bbox"]) for instance in oracle_dict["instances"]]), 
                                      "gt_classes": torch.tensor([instance["category_id"] for instance in oracle_dict["instances"]]),
@@ -62,6 +65,8 @@ def get_detection_dataset_dicts(names, filter_empty=True, oracle2d=None, **kwarg
     assert len(names), names
     dataset_dicts = [DatasetCatalog.get(dataset_name) for dataset_name in names]
     if oracle2d:
+        logger = logging.getLogger(__name__)
+        logger.info(f"Merging Oracle 2D files for datasets: {names}")
         merge_oracle2d_to_detection_dicts(dataset_dicts, oracle2d)
     for dataset_name, dicts in zip(names, dataset_dicts):
         assert len(dicts), "Dataset '{}' is empty!".format(dataset_name)
@@ -112,18 +117,16 @@ def _train_loader_from_config(cfg, mapper=None, *, dataset=None, sampler=None, d
             # only one source? don't re-weight then.
             if len(dataset_ids) == 1:
                 weights_per_img = torch.ones(len(dataset_ids_per_img)).float()
-            
-            # compute per-dataset weights.
+
             else:
                 counts = np.bincount(dataset_ids_per_img)
                 counts = [counts[id] for id in dataset_ids]
                 weights = [1 - count/np.sum(counts) for count in counts]
                 weights = [weight/np.min(weights) for weight in weights]
-                
+
                 weights_per_img = torch.zeros(len(dataset_ids_per_img)).float()
                 dataset_ids_per_img = torch.FloatTensor(dataset_ids_per_img).long()
 
-                # copy weights
                 for dataset_id, weight in zip(dataset_ids, weights):
                     weights_per_img[dataset_ids_per_img == dataset_id] = weight
 
@@ -134,7 +137,7 @@ def _train_loader_from_config(cfg, mapper=None, *, dataset=None, sampler=None, d
         # balance the weight sampling by datasets
         elif sampler_name == "TrainingSampler" and balance_datasets:
             sampler = RepeatFactorTrainingSampler(weights_per_img)
-        
+
         # balance the weight sampling by categories
         elif sampler_name == "RepeatFactorTrainingSampler" and not balance_datasets:
             repeat_factors = repeat_factors_from_category_frequency(
@@ -228,16 +231,24 @@ def build_detection_train_loader(dataset, *, mapper, sampler=None, total_batch_s
     )
 
 def _test_loader_from_config(cfg, dataset_name, mode, mapper=None):
+    logger = logging.getLogger(__name__)
     if isinstance(dataset_name, str):
         dataset_name = [dataset_name]
+    
+    oracle2d_files = None
+    if cfg.TEST.ORACLE2D:
+        oracle2d_files = [
+            getattr(getattr(cfg.DATASETS.ORACLE2D_FILES[cfg.DATASETS.ORACLE2D_PROMPT], mode), x) for x in dataset_name
+        ]
+        logger.info(f"Using Oracle 2D prompt: {cfg.DATASETS.ORACLE2D_PROMPT}")
+        logger.info(f"Oracle 2D file paths for {mode} mode:")
+        for dataset, oracle_file in zip(dataset_name, oracle2d_files):
+            logger.info(f"  {dataset} -> {oracle_file}")
+    
     dataset = get_detection_dataset_dicts(
         dataset_name,
         filter_empty=False,
-        oracle2d=[
-            getattr(getattr(cfg.DATASETS.ORACLE2D_FILES[cfg.DATASETS.ORACLE2D_FILES.EVAL_MODE], mode), x) for x in dataset_name
-        ]
-        if cfg.TEST.ORACLE2D
-        else None,
+        oracle2d=oracle2d_files,
         proposal_files=[
             cfg.DATASETS.PROPOSAL_FILES_TEST[list(cfg.DATASETS.TEST).index(x)] for x in dataset_name
         ]
